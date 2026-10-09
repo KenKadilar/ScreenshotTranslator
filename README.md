@@ -28,9 +28,9 @@ hotkey rewrite, and the frozen-capture trick are written up there.
 
 | Hotkey (default)     | Pipeline                              | Output                                   |
 | -------------------- | ------------------------------------- | ---------------------------------------- |
-| `Ctrl + PrintScreen` | Region screenshot only                | PNG saved + copied to clipboard          |
-| `Shift + PrintScreen`| Screenshot -> OCR                      | Text popup + `.txt` saved + text copied  |
-| `Alt + PrintScreen`  | Screenshot -> OCR -> DeepSeek translate | Translation popup + `.txt` saved + copied|
+| `Ctrl + F11`         | Region screenshot only                | PNG saved + copied to clipboard          |
+| `Shift + F11`        | Screenshot -> OCR                      | `.txt` saved + text copied + brief toast |
+| `Alt + F11`          | Screenshot -> OCR -> DeepSeek translate | `.txt` saved + copied + brief toast      |
 
 The tray menu adds an OCR-language picker, an in-app hotkey editor, "show/copy last
 result", a run-at-Windows-startup toggle, output-folder shortcuts, and a debug submenu
@@ -60,7 +60,7 @@ in the config file (see below).
 
 Settings live in `DATA/ScreenshotTranslator/.env` (seeded with safe defaults on first
 run). Notable keys: `DEEPSEEK_API_KEY`, `DEEPSEEK_MODEL`, `DEEPSEEK_TARGET_LANGUAGE`,
-`OCR_LANG` (`auto` / `en` / `japan` / `fr` / `tr`), `OCR_MIN_SCORE`, the three
+`OCR_LANG` (`en` default, or `auto` / `japan` / `fr` / `tr`), `OCR_MIN_SCORE`, the three
 `HOTKEY_*` bindings, and clipboard-copy toggles. Anything you change through the tray
 menu is written straight back to this file.
 

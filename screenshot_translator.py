@@ -1,25 +1,24 @@
 #!/usr/bin/env python3
 r"""
-ScreenshotTranslator V4.1
+ScreenshotTranslator V4.6
 
 Tray-only instant OCR screenshot tool.
 
 V2.2 scope:
-- System tray OCR Language menu. First-install default is All-arounder / Auto.
-- Ctrl + PrintScreen: region screenshot only
+- System tray OCR Language menu. First-install default is English.
+- Ctrl + F11: region screenshot only
   -> DATA/ScreenshotTranslator/Screenshots/YYYY-MM/
 
-- Shift + PrintScreen: region screenshot + immediate OCR only
+- Shift + F11: region screenshot + immediate OCR only
   -> DATA/ScreenshotTranslator/OCR Screenshots/YYYY-MM/
   -> DATA/ScreenshotTranslator/OCRText/YYYY-MM/
-  -> plain text popup
-  -> OCR result is copied to clipboard
+  -> "OCR complete" status bubble, result copied to clipboard
 
-- Alt + PrintScreen: OCR + DeepSeek translation
+- Alt + F11: OCR + DeepSeek translation
   -> DATA/ScreenshotTranslator/Translation Screenshots/YYYY-MM/
-  -> V2.2 OCRs, translates with DeepSeek, shows translation, and copies translation
+  -> OCRs, translates with DeepSeek, copies the translation to the clipboard
 
-DeepSeek/API translation is enabled for Alt + PrintScreen. Shift + PrintScreen remains OCR-only.
+DeepSeek/API translation is enabled for Alt + F11. Shift + F11 remains OCR-only.
 
 Install:
     pip install -r requirements.txt
@@ -257,11 +256,11 @@ class NativeHotkeyFilter(QAbstractNativeEventFilter):
 # ---------------------------------------------------------------------------
 
 APP_NAME = "ScreenshotTranslator"
-APP_VERSION = "4.1"
+APP_VERSION = "4.6"
 APP_ICON_FILE = "ScreenshotTranslator_Icon.ico"
 STARTUP_REG_NAME = "ScreenshotTranslator"
 
-DEFAULT_LANG = "auto"
+DEFAULT_LANG = "en"
 DEFAULT_MIN_SCORE = 0.0
 DEFAULT_DISABLE_DOC_PREPROCESS = True
 DEFAULT_COPY_OCR_TEXT_TO_CLIPBOARD = True
@@ -271,9 +270,10 @@ DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
 DEFAULT_DEEPSEEK_TARGET_LANGUAGE = "English"
 DEFAULT_DEEPSEEK_TIMEOUT_SECONDS = 60
 DEFAULT_OCR_LOCAL_AUTO_SEED = True
-DEFAULT_HOTKEY_SCREENSHOT_ONLY = "ctrl+print screen"
-DEFAULT_HOTKEY_OCR_ONLY = "shift+print screen"
-DEFAULT_HOTKEY_TRANSLATE = "alt+print screen"
+# F12 is reserved by Windows for the debugger: RegisterHotKey refuses bare F12 and shift+F12 with 1409.
+DEFAULT_HOTKEY_SCREENSHOT_ONLY = "ctrl+f11"
+DEFAULT_HOTKEY_OCR_ONLY = "shift+f11"
+DEFAULT_HOTKEY_TRANSLATE = "alt+f11"
 
 _LAST_OCRLOCAL_SEED_REPORT = "not run"
 
@@ -335,6 +335,11 @@ def set_windows_dpi_awareness() -> None:
         ctypes.windll.user32.SetProcessDPIAware()
     except Exception:
         pass
+
+
+def hotkey_user32():
+    """user32 with use_last_error so RegisterHotKey failures report a real code."""
+    return ctypes.WinDLL("user32", use_last_error=True)
 
 
 def is_windows() -> bool:
@@ -471,7 +476,7 @@ def get_env_path() -> Path:
 
 def default_env_text() -> str:
     return (
-        'OCR_LANG="auto"\n'
+        'OCR_LANG="en"\n'
         'OCR_MIN_SCORE="0.0"\n'
         'OCR_DISABLE_DOC_PREPROCESS="true"\n'
         'OCR_COPY_TEXT_TO_CLIPBOARD="true"\n'
@@ -482,9 +487,9 @@ def default_env_text() -> str:
         'TRANSLATION_COPY_TO_CLIPBOARD="true"\n'
         'DEEPSEEK_TIMEOUT_SECONDS="60"\n'
         'OCR_LOCAL_AUTO_SEED="true"\n'
-        'HOTKEY_SCREENSHOT_ONLY="ctrl+print screen"\n'
-        'HOTKEY_OCR_ONLY="shift+print screen"\n'
-        'HOTKEY_TRANSLATE="alt+print screen"\n'
+        'HOTKEY_SCREENSHOT_ONLY="ctrl+f11"\n'
+        'HOTKEY_OCR_ONLY="shift+f11"\n'
+        'HOTKEY_TRANSLATE="alt+f11"\n'
     )
 
 
@@ -1021,6 +1026,14 @@ def capture_virtual_screen() -> Tuple[Image.Image, dict]:
     return img, monitor
 
 
+def qt_virtual_geometry() -> QRect:
+    """Union of every screen, in Qt's logical coordinates."""
+    geometry = QRect()
+    for screen in QApplication.screens():
+        geometry = geometry.united(screen.geometry())
+    return geometry
+
+
 def pil_image_to_qpixmap(image: Image.Image) -> QPixmap:
     """
     Convert a PIL RGB image to QPixmap for the frozen selection overlay.
@@ -1072,12 +1085,16 @@ class CaptureOverlay(QWidget):
         self.setCursor(Qt.CursorShape.CrossCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
-        self.setGeometry(
-            int(virtual_monitor["left"]),
-            int(virtual_monitor["top"]),
-            int(virtual_monitor["width"]),
-            int(virtual_monitor["height"]),
-        )
+        # V4.3: cover every screen in Qt's coordinates; the mss values are physical pixels.
+        overlay_geometry = qt_virtual_geometry()
+        if overlay_geometry.isEmpty():
+            overlay_geometry = QRect(
+                int(virtual_monitor["left"]),
+                int(virtual_monitor["top"]),
+                int(virtual_monitor["width"]),
+                int(virtual_monitor["height"]),
+            )
+        self.setGeometry(overlay_geometry)
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
@@ -1666,12 +1683,19 @@ class StatusToast(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.label)
 
-    def show_status(self, text: str) -> None:
+        self.hide_timer = QTimer(self)
+        self.hide_timer.setSingleShot(True)
+        self.hide_timer.timeout.connect(self.hide)
+
+    def show_status(self, text: str, auto_hide_ms: int = 0) -> None:
+        self.hide_timer.stop()  # a new status cancels the previous auto-hide
         self.label.setText(text)
         self.adjustSize()
         self.position_bottom_right()
         self.show()
         self.raise_()
+        if auto_hide_ms > 0:
+            self.hide_timer.start(auto_hide_ms)
 
     def position_bottom_right(self) -> None:
         screen = QApplication.primaryScreen()
@@ -1713,8 +1737,7 @@ class HotkeySettingsDialog(QDialog):
 
     Important:
     The main app unhooks its own global hotkeys before opening this dialog.
-    Otherwise recording Ctrl/Shift/Alt + PrintScreen can trigger the screenshot
-    action instead of being recorded.
+    Otherwise recording a bound combo can trigger its capture action instead.
     """
 
     ACTIONS = [
@@ -1739,7 +1762,7 @@ class HotkeySettingsDialog(QDialog):
         root = QVBoxLayout(self)
         instructions = QLabel(
             "Set the shortcuts used by the tray app. Click Record, press the shortcut, then Save. "
-            "Examples: print screen, ctrl+print screen, shift+print screen, alt+print screen."
+            "Examples: f11, ctrl+f11, shift+f11, alt+f11, page up, print screen."
         )
         instructions.setWordWrap(True)
         root.addWidget(instructions)
@@ -1925,20 +1948,22 @@ class TrayScreenshotTranslator(QObject):
 
         self.menu = QMenu()
 
-        self.capture_screenshot_action = QAction("Capture Screenshot Only  (Ctrl + PrintScreen)")
+        self.capture_screenshot_action = QAction("Capture Screenshot Only")
         self.capture_screenshot_action.triggered.connect(
             lambda: self.start_capture(CaptureTarget.SCREENSHOT_ONLY)
         )
 
-        self.capture_ocr_only_action = QAction("Capture + OCR Only  (Shift + PrintScreen)")
+        self.capture_ocr_only_action = QAction("Capture + OCR Only")
         self.capture_ocr_only_action.triggered.connect(
             lambda: self.start_capture(CaptureTarget.OCR_ONLY)
         )
 
-        self.capture_ocr_action = QAction("Capture + Translate  (Alt + PrintScreen)")
+        self.capture_ocr_action = QAction("Capture + Translate")
         self.capture_ocr_action.triggered.connect(
             lambda: self.start_capture(CaptureTarget.TRANSLATION_OCR)
         )
+
+        self.update_capture_action_labels()
 
         self.ocr_language_menu = QMenu("OCR Language")
         self.ocr_language_group = QActionGroup(self)
@@ -2044,8 +2069,14 @@ class TrayScreenshotTranslator(QObject):
         self.exit_action = QAction("Exit")
         self.exit_action.triggered.connect(self.exit_app)
 
-        # Keep the tray menu intentionally short. Captures are mainly hotkey-driven:
-        # Ctrl+PrintScreen, Shift+PrintScreen, Alt+PrintScreen.
+        # Keep the tray menu intentionally short. Captures are mainly hotkey-driven.
+        # On Linux those native (Win32) hotkeys are unavailable, so expose the
+        # captures directly in the tray menu as a no-hotkey fallback.
+        if not is_windows():
+            self.menu.addAction(self.capture_ocr_action)
+            self.menu.addAction(self.capture_ocr_only_action)
+            self.menu.addAction(self.capture_screenshot_action)
+            self.menu.addSeparator()
         self.menu.addMenu(self.ocr_language_menu)
         self.menu.addAction(self.hotkey_settings_action)
         self.menu.addSeparator()
@@ -2068,6 +2099,8 @@ class TrayScreenshotTranslator(QObject):
 
         self.capture_requested.connect(self._capture_requested_from_hotkey)
         self.register_hotkeys()
+        if not is_windows():
+            self._setup_unix_capture_signals()
 
         msg = f"{APP_NAME} v{APP_VERSION} is running."
         if not self.hotkey_registered_descriptions:
@@ -2088,8 +2121,7 @@ class TrayScreenshotTranslator(QObject):
 
     def open_hotkey_settings(self) -> None:
         # Temporarily remove this app's native global shortcuts while recording.
-        # Otherwise Ctrl/Shift/Alt + PrintScreen can trigger capture instead of
-        # being recorded.
+        # Otherwise a bound combo can trigger capture instead of being recorded.
         self.unregister_hotkeys()
 
         dialog = HotkeySettingsDialog(get_hotkey_map(), self.app_icon)
@@ -2142,7 +2174,13 @@ class TrayScreenshotTranslator(QObject):
         self.restart_ocr_worker()
         self.update_tray_tooltip()
 
+    def update_capture_action_labels(self) -> None:
+        self.capture_screenshot_action.setText(f"Capture Screenshot Only  ({get_hotkey_screenshot_only()})")
+        self.capture_ocr_only_action.setText(f"Capture + OCR Only  ({get_hotkey_ocr_only()})")
+        self.capture_ocr_action.setText(f"Capture + Translate  ({get_hotkey_translate()})")
+
     def update_tray_tooltip(self) -> None:
+        self.update_capture_action_labels()
         self.tray.setToolTip(
             f"{APP_NAME} v{APP_VERSION}\n"
             f"{get_hotkey_screenshot_only()} -> screenshot only\n"
@@ -2231,7 +2269,7 @@ class TrayScreenshotTranslator(QObject):
             return
 
         try:
-            user32 = ctypes.windll.user32
+            user32 = hotkey_user32()
             for hotkey_id in list(self.native_hotkey_ids):
                 try:
                     user32.UnregisterHotKey(None, int(hotkey_id))
@@ -2240,6 +2278,39 @@ class TrayScreenshotTranslator(QObject):
             self.native_hotkey_ids.clear()
         except Exception:
             pass
+
+    def _setup_unix_capture_signals(self) -> None:
+        """Linux global-hotkey replacement. A GNOME custom keybinding sends this
+        process SIGUSR1 (OCR + DeepSeek translate) or SIGUSR2 (OCR only); we then
+        run the same capture the tray actions do. Qt's C++ event loop blocks
+        Python signal delivery, so a periodic QTimer keeps the interpreter ticking
+        and dispatches any pending capture on the main (GUI) thread. No root, no
+        keyboard lib, no Win32. Windows keeps its native hotkeys untouched."""
+        import signal
+
+        self._pending_capture_target = None
+
+        def _on_signal(signum, _frame):
+            if signum == signal.SIGUSR1:
+                self._pending_capture_target = CaptureTarget.TRANSLATION_OCR
+            elif signum == signal.SIGUSR2:
+                self._pending_capture_target = CaptureTarget.OCR_ONLY
+            elif signum == signal.SIGRTMIN:
+                self._pending_capture_target = CaptureTarget.SCREENSHOT_ONLY
+
+        signal.signal(signal.SIGUSR1, _on_signal)
+        signal.signal(signal.SIGUSR2, _on_signal)
+        signal.signal(signal.SIGRTMIN, _on_signal)
+
+        self._signal_poll_timer = QTimer()
+        self._signal_poll_timer.timeout.connect(self._drain_pending_capture)
+        self._signal_poll_timer.start(120)
+
+    def _drain_pending_capture(self) -> None:
+        target = self._pending_capture_target
+        if target is not None:
+            self._pending_capture_target = None
+            self.start_capture(target)
 
     def register_hotkeys(self) -> None:
         self.hotkey_registered_descriptions = []
@@ -2259,7 +2330,7 @@ class TrayScreenshotTranslator(QObject):
             app.installNativeEventFilter(self.native_hotkey_filter)
             self._native_hotkey_filter_installed = True
 
-        user32 = ctypes.windll.user32
+        user32 = hotkey_user32()
         user32.RegisterHotKey.argtypes = [
             ctypes.wintypes.HWND,
             ctypes.wintypes.INT,
@@ -2290,15 +2361,17 @@ class TrayScreenshotTranslator(QObject):
                 )
                 continue
 
+            ctypes.set_last_error(0)
             ok = bool(user32.RegisterHotKey(None, int(hotkey_id), int(modifiers), int(vk)))
             if ok:
                 self.native_hotkey_ids[int(hotkey_id)] = target
                 self.hotkey_registered_descriptions.append(f"{combo} -> {description} [native]")
             else:
                 err = ctypes.get_last_error()
+                reason = " Another app already owns this shortcut." if err == 1409 else ""
                 self.show_message(
                     "Hotkey failed",
-                    f"Could not register {combo}. It may already be used by another app. Windows error: {err}",
+                    f"Could not register {combo}.{reason} Windows error: {err}",
                     QSystemTrayIcon.MessageIcon.Warning,
                     6000,
                 )
@@ -2368,7 +2441,8 @@ class TrayScreenshotTranslator(QObject):
             self.overlay = CaptureOverlay(self.pending_monitor, self.pending_full_image)
             self.overlay.region_selected.connect(self._save_selected_region)
             self.overlay.cancelled.connect(self._capture_cancelled)
-            self.overlay.showFullScreen()
+            # V4.3: show(), not showFullScreen(), which clamps the overlay to one screen.
+            self.overlay.show()
             self.overlay.raise_()
             self.overlay.activateWindow()
             QTimer.singleShot(0, self.overlay._force_focus_and_grab)
@@ -2479,7 +2553,6 @@ class TrayScreenshotTranslator(QObject):
         )
 
     def on_ocr_result(self, image_path_str: str, text: str, txt_path_str: str) -> None:
-        image_path = Path(image_path_str)
         txt_path = Path(txt_path_str)
 
         self.last_ocr_text = text
@@ -2499,11 +2572,11 @@ class TrayScreenshotTranslator(QObject):
             self.translation_requested.emit(image_path_str, text, txt_path_str)
             return
 
-        self.status_toast.hide()
         if get_copy_ocr_text_to_clipboard():
             QApplication.clipboard().setText(text)
 
-        self.popup.show_result(image_path, text, txt_path)
+        # V4.2: no result window, the text lands in the clipboard and the .txt file.
+        self.status_toast.show_status("OCR complete", 1000)
         self.show_message(
             "OCR complete",
             f"Text saved:\n{txt_path.name}",
@@ -2512,7 +2585,6 @@ class TrayScreenshotTranslator(QObject):
         )
 
     def on_translation_result(self, image_path_str: str, ocr_text: str, translation: str, txt_path_str: str) -> None:
-        image_path = Path(image_path_str)
         txt_path = Path(txt_path_str)
 
         self.last_translation_text = translation
@@ -2520,11 +2592,11 @@ class TrayScreenshotTranslator(QObject):
         self.show_last_translation_action.setEnabled(True)
         self.copy_last_translation_action.setEnabled(True)
 
-        self.status_toast.hide()
         if get_copy_translation_to_clipboard():
             QApplication.clipboard().setText(translation)
 
-        self.popup.show_result(image_path, translation, txt_path)
+        # V4.2: no result window, the translation lands in the clipboard and the .txt file.
+        self.status_toast.show_status("Translation complete", 1000)
         self.show_message(
             "Translation complete",
             f"Translation saved:\n{txt_path.name}",
