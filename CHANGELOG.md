@@ -38,6 +38,56 @@ binding is system-wide, so the focused app never sees the key. Ctrl+PageUp would
 taken browser and editor tab switching, and Shift+PageUp page-wise text selection.
 F11's only real collisions are Office's Alt+F11 and Shift+F11.
 
+### Packaging: PyInstaller needs the dependency metadata, not just the modules
+
+The first v4.6 exe started fine and then failed every capture with
+`RuntimeError: A dependency error occurred during pipeline creation`. Nothing was
+wrong with the code; the bundle was missing `.dist-info` metadata.
+
+`paddlex/utils/deps.py` decides whether a dependency is available by reading its
+installed metadata, not by importing it:
+
+```python
+def get_dep_version(dep):
+    try:
+        return importlib.metadata.version(dep)
+    except importlib.metadata.PackageNotFoundError:
+        return None          # -> treated as "not installed"
+```
+
+So in a frozen bundle every dependency whose `.dist-info` was not collected looks
+absent, `require_deps` raises `DependencyError`, and `paddleocr/_pipelines/base.py`
+re-raises it as the message above. The modules were all present and importable the
+whole time.
+
+`--collect-all paddle --collect-all paddlex --collect-all paddleocr` collects metadata
+for only those three packages. `--recursive-copy-metadata` follows `Requires-Dist` but
+skips extras-marked dependencies, and the OCR stack arrives through `paddlex[ocr]`, so
+20 were still missing. The build now copies metadata for every installed distribution:
+
+```
+# 1. generate a --copy-metadata flag for every installed distribution
+python - <<'EOF' > flags.txt
+import importlib.metadata as m
+names = sorted({d.metadata["Name"] for d in m.distributions() if d.metadata.get("Name")})
+print(" ".join(f"--copy-metadata {n}" for n in names), end="")
+EOF
+
+# 2. build with those flags appended
+pyinstaller --noconfirm --onedir --windowed --name ScreenshotTranslator --icon ScreenshotTranslator_Icon.ico --add-data "ScreenshotTranslator_Icon.ico;." --collect-all paddle --collect-all paddlex --collect-all paddleocr $(cat flags.txt) screenshot_translator.py
+```
+
+Counts, for diagnosing a future regression: required-and-installed OCR dependencies
+missing metadata went 35 -> 20 -> 0, and the bundle's dist-info folder count went
+14 -> 59 -> 99. The known-good Exe-Toolbox v4.1 bundle had 46. **If OCR ever fails this
+way again, compare `ls _internal | grep -c dist-info` against a working bundle first.**
+
+Two testing lessons. A venv-based OCR test cannot catch this, because the venv always
+has the metadata; the test has to run against the shipped bundle. And pure-Python
+modules live in the PYZ archive appended to the exe, not loose in `_internal`, so
+checking `_internal` alone will wrongly report them missing (read the archive with
+`PyInstaller.archive.readers`).
+
 ## v4.5: F12 hotkeys and a truthful hotkey error
 
 This keyboard has no dedicated PrintScreen, so the three defaults moved to
